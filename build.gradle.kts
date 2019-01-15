@@ -3,6 +3,7 @@
 // Apply the java plugin to add support for Java
 plugins {
     java
+    kotlin("jvm") version "1.3.11"
     application
 }
 
@@ -16,6 +17,16 @@ dependencies {
 
     // Annotations for better code documentation
     compile("com.intellij:annotations:12.0")
+
+    // Kotlin stdlib
+    compile(kotlin("stdlib"))
+
+    // HTTP server
+    compile("com.sparkjava:spark-kotlin:1.0.0-alpha")
+
+    // Key-value storage - RocksDB
+    // https://github.com/iotaledger/iri/issues/350#issuecomment-386713966
+    compile("org.rocksdb:rocksdbjni:5.3.6")
 
     // JUnit 5
     testImplementation("org.junit.jupiter:junit-jupiter-api:5.3.1")
