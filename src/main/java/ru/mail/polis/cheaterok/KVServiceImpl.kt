@@ -1,14 +1,43 @@
 package ru.mail.polis.cheaterok
 
+import java.math.BigInteger
+import java.security.MessageDigest
+
 import spark.kotlin.*
 
 import ru.mail.polis.KVService
 import ru.mail.polis.KVDao
 
 
-class KVServiceImpl(val port: Int, val dao: KVDao) : KVService {
+fun quorum(nodesCount: Int): Int = if ((nodesCount % 2) == 0) {nodesCount / 2} else {nodesCount / 2 + 1}
+
+
+class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : KVService {
 
     val server = ignite()
+
+    // Всё равно там localhost
+    val portsTopology = topology.map {it.split(":")[2].toInt()}
+
+    val nodesCount = portsTopology.size
+    val defaultAckFrom = listOf(quorum(nodesCount), nodesCount)
+
+    fun getNodesToAsk(id: ByteArray, replicas: String?): Set<Int> {
+        val (ack, from) = replicas?.split("/")?.map{it.toInt()} ?: defaultAckFrom 
+
+        val hash = run {
+            val md = MessageDigest.getInstance("SHA-256")
+            val hash = md.digest(id)
+            BigInteger(1, hash)
+        }
+
+        fun getStartIndex(collectionSize: Int): Int = (hash % collectionSize.toBigInteger()).toInt()
+
+        val startIndex = getStartIndex(nodesCount) + getStartIndex(from)
+
+        // https://stackoverflow.com/questions/40938716/how-to-cycle-a-list-infinitely-and-lazily-in-kotlin/40940840#40940840
+        return generateSequence {portsTopology}.flatten().drop(startIndex - 1).take(ack).toSet()
+    }
 
     override fun start() {
         server.ipAddress("0.0.0.0")
@@ -21,26 +50,30 @@ class KVServiceImpl(val port: Int, val dao: KVDao) : KVService {
         }
 
         server.get("/v0/entity") {
-            try { 
-                val key = queryParams("id").toByteArray()
+            val key = try {queryParams("id").toByteArray()} catch (e: IllegalStateException) {null}
+            val replicas = try {queryParams("replicas")} catch (e: IllegalStateException) {null}
 
-                if (key.isEmpty()) {
-                    status(400)
-                    "No key specified"
-                } else {
-                    val data = dao.get(key)
-
-                    status(200)
-                    data
-                }
-            }
-            catch (e: IllegalStateException) {
+            if (key == null) {
                 status(400)
                 "Empty request"
-            }
-            catch (e: NoSuchElementException) {
-                status(404)
-                "Value not found"
+            } else if (key.isEmpty()) {
+                status(400)
+                "No key specified"
+            } else {
+                if (replicas == null) {
+                    val data = try {dao.get(key)} catch (e: NoSuchElementException) {null}
+                    if (data == null) {
+                        status(404)
+                        "Value not found"
+                    } else {
+                        status(200)
+                        data
+                    }
+                } else {
+                    val nodesToAsk = getNodesToAsk(key, replicas)
+                    
+                    "TODO"
+                }
             }
         }
 
