@@ -2,7 +2,7 @@ package ru.mail.polis.cheaterok
 
 import java.math.BigInteger
 import java.security.MessageDigest
-import java.io.ByteArrayInputStream
+import java.util.Base64
 
 import org.slf4j.LoggerFactory
 
@@ -31,42 +31,54 @@ class Logger {
 fun quorum(nodesCount: Int): Int = nodesCount / 2 + 1
 
 
-data class Response(val port: Int, val statusCode: Int, val data: Data)
+data class Response(val port: Int, val data: Data?)
 
 fun localGet(nodes: Set<Int>, key: ByteArray): List<Response> {
     return nodes.map { port -> 
         try {
             val res = get("http://localhost:${port}/local", params=mapOf("id" to String(key)), timeout=1.0)
-            Response(port, res.statusCode, Data.fromByteArray(res.content))
+            val data = if (res.statusCode == 200) Data.fromBase64String(res.text) else null
+            Response(port, data)
         }
         catch (e: java.net.SocketTimeoutException) {null}
     }.filterNotNull()
 }
 
 fun asyncPut(nodes: Set<Int>, key:ByteArray, data: Data) {
-    val inputStream = ByteArrayInputStream(data.toByteArray())
     nodes.map { port ->
         async.put("http://localhost:${port}/local", 
                   params=mapOf("id" to String(key)), 
-                  data=inputStream, 
-                  headers = mapOf("Content-Type" to "application/octet-stream"),
+                  data=data.toBase64String(),
                   timeout=1.0, onError = {})
     }
 }
 
 fun localPut(nodes: Set<Int>, key:ByteArray, data: Data): List<Int> {
-    val inputStream = ByteArrayInputStream(data.toByteArray())
     return nodes.map { port ->
         try {
             put("http://localhost:${port}/local", 
-            params=mapOf("id" to String(key)), 
-            data=inputStream, 
-            headers = mapOf("Content-Type" to "application/octet-stream"),
+            params=mapOf("id" to String(key)),
+            data=data.toBase64String(), 
             timeout=1.0).statusCode
         }
         catch (e: java.net.SocketTimeoutException) {null}
     }.filterNotNull()
 }
+
+fun localDelete(nodes: Set<Int>, key: ByteArray): List<Int> {
+    return nodes.map { port ->
+        try {
+            delete("http://localhost:${port}/local", 
+            params=mapOf("id" to String(key)),
+            timeout=1.0).statusCode
+        }
+        catch (e: java.net.SocketTimeoutException) {null}
+    }.filterNotNull()
+}
+
+
+fun ByteArray.toBase64(): String = String(Base64.getEncoder().encode(this))
+fun String.fromBase64(): ByteArray = Base64.getDecoder().decode(this.toByteArray())
 
 
 class Data(var payload: ByteArray, var timestamp: Long, var isAlive: Boolean) {
@@ -78,6 +90,8 @@ class Data(var payload: ByteArray, var timestamp: Long, var isAlive: Boolean) {
         return aliveBit + timestampBytes + payload
     }
 
+    fun toBase64String(): String = this.toByteArray().toBase64()
+
     companion object {
         // Из массива байт, в котором "Data" - в нормальную Data
         fun fromByteArray(dataBytes: ByteArray): Data {
@@ -86,6 +100,8 @@ class Data(var payload: ByteArray, var timestamp: Long, var isAlive: Boolean) {
             val isAlive = dataBytes[0].toInt() != 0
             return Data(payload, timestamp, isAlive)
         }
+
+        fun fromBase64String(str: String): Data = Data.fromByteArray(str.fromBase64())
 
         // Оборачиваем payload в Data (генерируем метку и ставим "живой")
         fun wrap(dataBytes: ByteArray): Data = Data(dataBytes, System.currentTimeMillis(), true)
@@ -156,28 +172,30 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             else {
                 val (ack, from) = splitReplicas(replicas)
                 val nodesToAsk = getNodesToAsk(key, from)
-                Logger.log(nodesToAsk.joinToString(", "))
 
                 val results = localGet(nodesToAsk, key)
-                Logger.log(results.joinToString(", "))
 
                 if (ack > results.size) {
                     status(504)
                     "Not enough replicas"
                 } else {
-                    val someData = results.filter { it.statusCode == 200 }.map {it.data}
+                    val (someData, noData) = results.partition { it.data != null }
                     if (someData.isEmpty()) {
                         status(404)
                         "Value not found"
                     } else {
-                        val freshest = someData.maxBy { it.timestamp }
-                        if (freshest == null) throw IllegalStateException("А вот и null-safety подвезли")
-                        val notSoFreshList = someData.filter { freshest.timestamp > it.timestamp }
-                        // Асинхронно приказываем всем обновить данные
-                        // asyncPut(notSoFreshList.map{it.port}.toSet(), key, freshest)
+                        /* 
+                         .? !! УХ КАК БЕЗОПАСНО ТО !! ?.
+                        */
+                        val freshest = someData.maxBy{ it.data!!.timestamp }!!.data
+
+                        val (freshData, staleData) = results.partition { it.data!!.timestamp == freshest!!.timestamp }
+
+                        asyncPut((noData + staleData).map{it.port}.toSet(), key, freshest ?: throw IllegalStateException("Теперь ещё безопаснее"))
+
                         if (!freshest.isAlive) {
                             status(404)
-                            "Value not found"
+                            "Value is dead"
                         } else {
                             status(200)
                             freshest.payload
@@ -220,16 +238,30 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
 
         server.delete("/v0/entity") {
             val key = try {queryParams("id").toByteArray()} catch (e: IllegalStateException) {null}
+            val replicas = try {queryParams("replicas")} catch (e: IllegalStateException) {null}
 
+            // Неправильные запросы
             if (key == null) {
                 status(400)
                 "Empty request"
             } else if (key.isEmpty()) {
                 status(400)
-                "Key is empty"
-            } else {
-                status(202)
-                "Key removed"
+                "No key specified"
+            } 
+            // Мякотка
+            else {
+                val (ack, from) = splitReplicas(replicas)
+                val nodesToAsk = getNodesToAsk(key, from)
+
+                val results = localDelete(nodesToAsk, key)
+
+                if (ack > results.size) {
+                    status(504)
+                    "Not enough replicas"
+                } else {
+                    status(202)
+                    "Accepted"
+                }
             }
         }
 
@@ -249,14 +281,18 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             */
             
             val key = queryParams("id").toByteArray()
-            val value = try {dao.get(key)} catch (e: NoSuchElementException) {null}
-            
-            if (value == null) {
+            val data = try {Data.fromByteArray(dao.get(key))} catch (e: NoSuchElementException) {null}
+
+            Logger.log("Local API :GET: Key ${String(key)}")
+
+            if (data == null) {
                 status(404)
-                "Value not found"
+                // "Value not found"
+                ""
             } else {
+                Logger.log("Local API :GET: ${String(data.payload)}")
                 status(200)
-                value 
+                data.toBase64String()
             }
         }
 
@@ -268,37 +304,41 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             */
 
             val key = queryParams("id").toByteArray()
-            val value = request.body().toByteArray()
+            val value = request.body().fromBase64()
+
+            Logger.log("Local API :PUT: Key ${String(key)}")
+            Logger.log("Local API :PUT: ${String(Data.fromByteArray(value).payload)}")
 
             dao.upsert(key, value)
 
             status(200)
-            "Value recorded"
+            // "Value recorded"
+            ""
         }
 
         server.delete("/local") {
             /*
                 Царь скомандовал "Удалить!"
 
-                Проверяем, что у нас чисто случайно не оказалось инфы свежее.
-                Оказалось - игнорируем.
-                Иначе - удаляем.
+                Удаляем и отправляем 200
             */
 
             val key = queryParams("id").toByteArray()
-
-            // Для удаления пересылаем весь пакет, но данных там уже нет
-            val theirs = Data.fromByteArray(request.bodyAsBytes())
-            val ours = try { Data.fromByteArray(dao.get(key)) } catch (e: NoSuchElementException) {null}
+            val data = try { Data.fromByteArray(dao.get(key)) } catch (e: NoSuchElementException) {null}
 
 
-            if (ours == null || theirs.timestamp > ours.timestamp) {
-                // Предполагаем, что гробик Царь там уже выставил
-                dao.upsert(key, theirs.toByteArray())
+            Logger.log("Local API :DELETE: Key ${String(key)}")
+            Logger.log("Local API :DELETE: Data ${String(data!!.payload)}")
+
+            if (data != null) {
+                data.isAlive = false
+                Logger.log(data.isAlive.toString())
+                dao.upsert(key, data.toByteArray())
             } 
 
             status(200)
-            "Value removed"
+            // "Value removed"
+            ""
         }
 
         server.get("*") {
