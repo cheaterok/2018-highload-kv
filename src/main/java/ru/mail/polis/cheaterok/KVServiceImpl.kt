@@ -185,17 +185,12 @@ class KVServiceImpl(val port: Int, val dao: KVDao, topology: Set<String>) : KVSe
                     "Not enough replicas"
                 } else {
                     val freshest = results.mapNotNull{ it.data }.maxBy{ it.timestamp }
-                    if (freshest == null) {
+                    if (freshest == null || !freshest.isAlive) {
                         status(404)
                         "Value not found"
                     } else {
-                        if (!freshest.isAlive) {
-                            status(404)
-                            "Value is dead"
-                        } else {
-                            status(200)
-                            freshest.payload
-                        }
+                        status(200)
+                        freshest.payload
                     }
                 }
             }
