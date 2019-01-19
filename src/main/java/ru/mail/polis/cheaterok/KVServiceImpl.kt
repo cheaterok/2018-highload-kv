@@ -41,6 +41,7 @@ fun localGet(nodes: Set<Int>, key: ByteArray): List<Response> {
             Response(port, data)
         }
         catch (e: java.net.SocketTimeoutException) {null}
+        catch (e: java.net.ConnectException) {null}
     }.filterNotNull()
 }
 
@@ -62,6 +63,7 @@ fun localPut(nodes: Set<Int>, key:ByteArray, data: Data): List<Int> {
             timeout=1.0).statusCode
         }
         catch (e: java.net.SocketTimeoutException) {null}
+        catch (e: java.net.ConnectException) {null}
     }.filterNotNull()
 }
 
@@ -73,6 +75,7 @@ fun localDelete(nodes: Set<Int>, key: ByteArray): List<Int> {
             timeout=1.0).statusCode
         }
         catch (e: java.net.SocketTimeoutException) {null}
+        catch (e: java.net.ConnectException) {null}
     }.filterNotNull()
 }
 
@@ -104,7 +107,7 @@ class Data(var payload: ByteArray, var timestamp: Long, var isAlive: Boolean) {
         fun fromBase64String(str: String): Data = Data.fromByteArray(str.fromBase64())
 
         // Оборачиваем payload в Data (генерируем метку и ставим "живой")
-        fun wrap(dataBytes: ByteArray): Data = Data(dataBytes, System.currentTimeMillis(), true)
+        fun wrap(dataBytes: ByteArray, isAlive: Boolean = true): Data = Data(dataBytes, System.currentTimeMillis(), isAlive)
     }
 }
 
@@ -160,6 +163,8 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             val key = try {queryParams("id").toByteArray()} catch (e: IllegalStateException) {null}
             val replicas = try {queryParams("replicas")} catch (e: IllegalStateException) {null}
 
+            val (ack, from) = splitReplicas(replicas)
+
             // Неправильные запросы
             if (key == null) {
                 status(400)
@@ -167,10 +172,12 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             } else if (key.isEmpty()) {
                 status(400)
                 "No key specified"
-            } 
+            } else if (ack < 1 || ack > from || from > nodesCount) {
+                status(400)
+                "Replicas are malformed"
+            }
             // Мякотка
             else {
-                val (ack, from) = splitReplicas(replicas)
                 val nodesToAsk = getNodesToAsk(key, from)
 
                 val results = localGet(nodesToAsk, key)
@@ -179,20 +186,12 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
                     status(504)
                     "Not enough replicas"
                 } else {
-                    val (someData, noData) = results.partition { it.data != null }
-                    if (someData.isEmpty()) {
+                    val freshest = results.mapNotNull{ it.data }.maxBy{ it.timestamp }
+                    if (freshest == null) {
                         status(404)
                         "Value not found"
                     } else {
-                        /* 
-                         .? !! УХ КАК БЕЗОПАСНО ТО !! ?.
-                        */
-                        val freshest = someData.maxBy{ it.data!!.timestamp }!!.data
-
-                        val (freshData, staleData) = results.partition { it.data!!.timestamp == freshest!!.timestamp }
-
-                        asyncPut((noData + staleData).map{it.port}.toSet(), key, freshest ?: throw IllegalStateException("Теперь ещё безопаснее"))
-
+                        // asyncPut((noData + staleData).map{it.port}.toSet(), key, freshest ?: throw IllegalStateException("Теперь ещё безопаснее"))
                         if (!freshest.isAlive) {
                             status(404)
                             "Value is dead"
@@ -209,6 +208,8 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             val key = try {queryParams("id").toByteArray()} catch (e: IllegalStateException) {null}
             val replicas = try {queryParams("replicas")} catch (e: IllegalStateException) {null}
 
+            val (ack, from) = splitReplicas(replicas)
+
             // Неправильные запросы
             if (key == null) {
                 status(400)
@@ -216,12 +217,15 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             } else if (key.isEmpty()) {
                 status(400)
                 "No key specified"
-            } 
+            } else if (ack < 1 || ack > from || from > nodesCount) {
+                status(400)
+                "Replicas are malformed"
+            }
+    
             // Мякотка
             else {
                 val data = Data.wrap(request.bodyAsBytes())
 
-                val (ack, from) = splitReplicas(replicas)
                 val nodesToAsk = getNodesToAsk(key, from)
 
                 val results = localPut(nodesToAsk, key, data)
@@ -240,6 +244,8 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             val key = try {queryParams("id").toByteArray()} catch (e: IllegalStateException) {null}
             val replicas = try {queryParams("replicas")} catch (e: IllegalStateException) {null}
 
+            val (ack, from) = splitReplicas(replicas)
+
             // Неправильные запросы
             if (key == null) {
                 status(400)
@@ -247,13 +253,15 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             } else if (key.isEmpty()) {
                 status(400)
                 "No key specified"
-            } 
+            } else if (ack < 1 || ack > from || from > nodesCount) {
+                status(400)
+                "Replicas are malformed"
+            }
             // Мякотка
             else {
-                val (ack, from) = splitReplicas(replicas)
                 val nodesToAsk = getNodesToAsk(key, from)
 
-                val results = localDelete(nodesToAsk, key)
+                val results = localPut(nodesToAsk, key, Data.wrap(byteArrayOf(), isAlive=false))
 
                 if (ack > results.size) {
                     status(504)
@@ -286,11 +294,12 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             Logger.log("Local API :GET: Key ${String(key)}")
 
             if (data == null) {
+                Logger.log("Local API :GET: NO DATA")
                 status(404)
                 // "Value not found"
                 ""
             } else {
-                Logger.log("Local API :GET: ${String(data.payload)}")
+                Logger.log("Local API :GET: ${data.isAlive} + ${data.timestamp}")
                 status(200)
                 data.toBase64String()
             }
@@ -307,7 +316,8 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             val value = request.body().fromBase64()
 
             Logger.log("Local API :PUT: Key ${String(key)}")
-            Logger.log("Local API :PUT: ${String(Data.fromByteArray(value).payload)}")
+            val data = Data.fromByteArray(value)
+            Logger.log("Local API :PUT: Data ${data.isAlive} + ${data.timestamp}")
 
             dao.upsert(key, value)
 
@@ -316,30 +326,31 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             ""
         }
 
-        server.delete("/local") {
-            /*
-                Царь скомандовал "Удалить!"
+        // server.delete("/local") {
+        //     /*
+        //         Царь скомандовал "Удалить!"
 
-                Удаляем и отправляем 200
-            */
+        //         Удаляем и отправляем 200
+        //     */
 
-            val key = queryParams("id").toByteArray()
-            val data = try { Data.fromByteArray(dao.get(key)) } catch (e: NoSuchElementException) {null}
+        //     val key = queryParams("id").toByteArray()
+        //     val data = try {
+        //             Data.fromByteArray(dao.get(key))
+        //         } catch (e: NoSuchElementException) { 
+        //             Data.wrap(byteArrayOf()) 
+        //         }
 
 
-            Logger.log("Local API :DELETE: Key ${String(key)}")
-            Logger.log("Local API :DELETE: Data ${String(data!!.payload)}")
+        //     Logger.log("Local API :DELETE: Key ${String(key)}")
+        //     Logger.log("Local API :DELETE: Data ${data.isAlive} + ${data.timestamp}")
 
-            if (data != null) {
-                data.isAlive = false
-                Logger.log(data.isAlive.toString())
-                dao.upsert(key, data.toByteArray())
-            } 
+        //     data.isAlive = false
+        //     dao.upsert(key, data.toByteArray())
 
-            status(200)
-            // "Value removed"
-            ""
-        }
+        //     status(200)
+        //     // "Value removed"
+        //     ""
+        // }
 
         server.get("*") {
             status(400)
