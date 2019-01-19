@@ -16,6 +16,7 @@ dependencies {
     // Annotations for better code documentation
     compile("com.intellij:annotations:12.0")
 
+    // Logging
     compile("org.slf4j:slf4j-simple:1.7.25")
 
     // Kotlin stdlib
