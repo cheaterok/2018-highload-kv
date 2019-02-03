@@ -14,20 +14,6 @@ import ru.mail.polis.KVService
 import ru.mail.polis.KVDao
 
 
-// https://www.baeldung.com/kotlin-logging
-class Logger {
-    companion object {
-        @Suppress("JAVA_CLASS_ON_COMPANION")
-        @JvmStatic
-        private val logger = LoggerFactory.getLogger(javaClass.enclosingClass)
-
-        fun log(s: String) {
-            logger.info(s)
-        }
-    }
-}
-
-
 class Data(val isAlive: Boolean, val timestamp: Long, val payload: ByteArray) {
     /*
         По сути это маска на массив байт.
@@ -260,15 +246,15 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             val key = queryParams("id").toByteArray()
             val data = try {Data.fromByteArray(dao.get(key))} catch (e: NoSuchElementException) {null}
 
-            Logger.log("Local API :GET: Key ${String(key)}")
+            log("Local API :GET: Key ${String(key)}")
 
             if (data == null) {
-                Logger.log("Local API :GET: NO DATA")
+                log("Local API :GET: NO DATA")
                 status(404)
                 // "Value not found"
                 ""
             } else {
-                Logger.log("Local API :GET: ${data.isAlive} + ${data.timestamp}")
+                log("Local API :GET: ${data.isAlive} + ${data.timestamp}")
                 status(200)
                 data.toBase64String()
             }
@@ -286,9 +272,9 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
             val key = queryParams("id").toByteArray()
             val value = request.body().fromBase64()
 
-            Logger.log("Local API :PUT: Key ${String(key)}")
+            log("Local API :PUT: Key ${String(key)}")
             val data = Data.fromByteArray(value)
-            Logger.log("Local API :PUT: Data ${data.isAlive} + ${data.timestamp}")
+            log("Local API :PUT: Data ${data.isAlive} + ${data.timestamp}")
 
             dao.upsert(key, value)
 
@@ -305,5 +291,13 @@ class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : 
 
     override fun stop() {
         server.stop()
+    }
+
+    companion object {
+        private val logger = LoggerFactory.getLogger(KVServiceImpl::class.java)
+
+        fun log(s: String) {
+            logger.info(s)
+        }
     }
 }
