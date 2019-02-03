@@ -69,7 +69,7 @@ class Data(val isAlive: Boolean, val timestamp: Long, val payload: ByteArray) {
 }
 
 
-data class Response(val port: Int, val data: Data?)
+data class Response(val node: String, val data: Data?)
 
 
 fun ByteArray.toBase64(): String = String(Base64.getEncoder().encode(this))
@@ -88,22 +88,22 @@ fun String.fromBase64(): ByteArray = Base64.getDecoder().decode(this.toByteArray
     можно представить, что всё асинхронно.
 *****************************************/
 
-fun localGet(nodes: Set<Int>, key: ByteArray): List<Response> {
-    return nodes.mapNotNull { port ->
+fun localGet(nodes: Set<String>, key: ByteArray): List<Response> {
+    return nodes.mapNotNull { node ->
         try {
-            val res = get("http://localhost:$port/local", params=mapOf("id" to String(key)), timeout=1.0)
+            val res = get(node + "/local", params=mapOf("id" to String(key)), timeout=1.0)
             val data = if (res.statusCode == 200) Data.fromBase64String(res.text) else null
-            Response(port, data)
+            Response(node, data)
         }
         catch (e: java.net.SocketTimeoutException) {null}
         catch (e: java.net.ConnectException) {null}
     }
 }
 
-fun localPut(nodes: Set<Int>, key:ByteArray, data: Data): List<Int> {
-    return nodes.mapNotNull { port ->
+fun localPut(nodes: Set<String>, key:ByteArray, data: Data): List<Int> {
+    return nodes.mapNotNull { node ->
         try {
-            put("http://localhost:$port/local",
+            put(node + "/local",
                 params=mapOf("id" to String(key)),
                 data=data.toBase64String(), 
                 timeout=1.0).statusCode
@@ -114,14 +114,11 @@ fun localPut(nodes: Set<Int>, key:ByteArray, data: Data): List<Int> {
 }
 
 
-class KVServiceImpl(val port: Int, val dao: KVDao, topology: Set<String>) : KVService {
+class KVServiceImpl(val port: Int, val dao: KVDao, val topology: Set<String>) : KVService {
 
     val server = ignite()
 
-    // Всё равно там localhost
-    val portsTopology = topology.map {it.split(":")[2].toInt()}
-
-    val nodesCount = portsTopology.size
+    val nodesCount = topology.size
     val quorum = nodesCount / 2 + 1
     val defaultAckFrom = Pair(quorum, nodesCount)
 
@@ -137,7 +134,7 @@ class KVServiceImpl(val port: Int, val dao: KVDao, topology: Set<String>) : KVSe
     } 
 
     // Вычисляем, у каких нод нужно спрашивать данные для конкретного ключа
-    fun getNodesToAsk(key: ByteArray, from: Int): Set<Int> {
+    fun getNodesToAsk(key: ByteArray, from: Int): Set<String> {
         val hash = run {
             val md = MessageDigest.getInstance("SHA-256")
             val hash = md.digest(key)
@@ -149,7 +146,7 @@ class KVServiceImpl(val port: Int, val dao: KVDao, topology: Set<String>) : KVSe
         // Нужно от начала startIndex взять from элементов
         // При этом, дойдя до конца списка, нужно брать с его начала
         // https://stackoverflow.com/questions/40938716/how-to-cycle-a-list-infinitely-and-lazily-in-kotlin/40940840#40940840
-        return generateSequence {portsTopology}.flatten().drop(startIndex).take(from).toSet()
+        return generateSequence {topology}.flatten().drop(startIndex).take(from).toSet()
     }
 
 
