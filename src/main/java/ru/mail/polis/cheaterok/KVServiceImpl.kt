@@ -104,9 +104,9 @@ fun localPut(nodes: Set<Int>, key:ByteArray, data: Data): List<Int> {
     return nodes.mapNotNull { port ->
         try {
             put("http://localhost:$port/local",
-            params=mapOf("id" to String(key)),
-            data=data.toBase64String(), 
-            timeout=1.0).statusCode
+                params=mapOf("id" to String(key)),
+                data=data.toBase64String(), 
+                timeout=1.0).statusCode
         }
         catch (e: java.net.SocketTimeoutException) {null}
         catch (e: java.net.ConnectException) {null}

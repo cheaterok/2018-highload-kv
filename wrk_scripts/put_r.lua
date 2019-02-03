@@ -17,6 +17,5 @@ function request()
     id = id - 1
   end
 
-	return wrk.format(nil, path)
+  return wrk.format(nil, path)
 end
-

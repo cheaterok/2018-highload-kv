@@ -8,4 +8,3 @@ function request()
   id = id + 1
   return wrk.format(nil, path)
 end
-

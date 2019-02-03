@@ -1,7 +1,7 @@
 id = 0
 
 function request()
-	path = "/v0/entity?id=" .. id
+  path = "/v0/entity?id=" .. id
   
   if wrk.method == "PUT" then
     id = id + 1
@@ -12,7 +12,6 @@ function request()
     wrk.method = "PUT"
     wrk.body = "abcdefghijklmnopqrstuvwxyz"
   end
-	
+  
   return wrk.format(nil, path)
 end
-

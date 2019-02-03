@@ -23,4 +23,3 @@ function request()
   
   return wrk.format(nil, path)
 end
-
